@@ -120,6 +120,11 @@ def main():
                          "also makes the live feed / KILL humanly observable)")
     ap.add_argument("--vlm", default="none",
                     help="VLM backend (none|ollama) — none keeps R0 fully offline")
+    ap.add_argument("--fatal", action="store_true",
+                    help="with --inject-fault: RE-RAISE after publishing the "
+                         "traceback — uncaught crash kills the pod; the "
+                         "in-block publish is flushed by Plugin.__exit__ "
+                         "(Baseline-1 pattern, proven off-node)")
     ap.add_argument("--inject-fault", action="store_true",
                     help="raise on the 3rd frame of the first event to re-prove "
                          "traceback capture (OFF by default for a genuine run)")
@@ -223,9 +228,14 @@ def main():
                             f"{'ALERT' if v['alert'] else ''}")
                     except Exception as e:
                         pub("harness.traceback", traceback.format_exc(),
-                                       meta={**fmeta, "error": type(e).__name__})
+                                       meta={**fmeta, "error": type(e).__name__,
+                                             "fatal": str(int(args.fatal))})
                         log.error(f"{evt.name} f{fi:03d} FAILED: {e}")
                         err += 1
+                        if args.fatal:
+                            # uncaught from here: the run DIES. run.exit still
+                            # publishes from finally, then __exit__ flushes all.
+                            raise
                     total += 1
                     if args.limit_frames and total >= args.limit_frames:
                         log.info(f"frame limit {args.limit_frames} reached")

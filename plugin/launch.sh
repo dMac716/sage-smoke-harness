@@ -9,6 +9,8 @@ MODE="${HARNESS_MODE:-harness}"
 case "$MODE" in
   probe)
     exec python3 /app/plugin/egress_probe.py ;;
+  cache-check)
+    exec python3 /app/plugin/cache_check.py ;;
   endphase)
     exec python3 /app/plugin/harness_endphase.py "$@" ;;
   harness|*)
