@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install runtime deps
+        run: pip install --quiet "pywaggle==0.56.3" numpy Pillow
+      - name: Harness selftest (synthetic series, full manifest + discrimination)
+        run: python ci/selftest.py
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t harness-ci .
+      - name: Container run produces the manifest
+        run: |
+          mkdir -p /tmp/out
+          docker run --rm -e PYWAGGLE_LOG_DIR=/out -e RUN_ID=ci-container \
+            -v /tmp/out:/out harness-ci
+          python3 - <<'PY'
+          import json
+          names = set()
+          exit_meta = None
+          for line in open('/tmp/out/data.ndjson'):
+              r = json.loads(line)
+              names.add(r['name'])
+              if r['name'] == 'run.exit':
+                  exit_meta = r['meta']
+          assert 'detect.smoke_score' in names and 'harness.frame_verdict' in names
+          assert exit_meta['status'] == 'clean' and exit_meta['err'] == '0'
+          print('container manifest OK:', sorted(names))
+          PY
