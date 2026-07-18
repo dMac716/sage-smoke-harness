@@ -1,0 +1,41 @@
+name: Build multi-arch image (GHCR)
+
+# Builds linux/arm64 (Jetson AGX Thor target) + linux/amd64 and publishes to
+# ghcr.io — a public registry the operator controls. Sage ECR submission can
+# follow later; GHCR lets the edge scheduler / nodes reference the image now.
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'plugin/**', 'Dockerfile', '.github/workflows/build-image.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-image
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: |
+            ghcr.io/dmac716/sage-smoke-harness:0.0.1
+            ghcr.io/dmac716/sage-smoke-harness:latest

@@ -1,0 +1,18 @@
+name: smoke-harness
+version: "0.0.1"
+namespace: dmac
+description: >
+  Self-instrumenting smoke-detection test harness: tiled change-gate ->
+  smoke heuristic -> optional VLM escalation over single-camera frame series,
+  with capture-all observability (per-frame verdicts, latency, resources,
+  tracebacks published as measurements), optional live dual-publish + soft
+  kill, and a bounded post-run LLM digest window.
+keywords: "wildfire, smoke, test-harness, validation, observability"
+authors: "Dave MacDonald <david.macdonald88@gmail.com>"
+license: "All rights reserved (evaluation harness; contact author)"
+homepage: "https://github.com/dMac716/sage-smoke-harness"
+source:
+  architectures:
+    - "linux/arm64"
+    - "linux/amd64"
+  branch: main
