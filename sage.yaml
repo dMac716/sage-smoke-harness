@@ -12,6 +12,7 @@ authors: "Dave MacDonald <david.macdonald88@gmail.com>"
 license: "All rights reserved (evaluation harness; contact author)"
 homepage: "https://github.com/dMac716/sage-smoke-harness"
 source:
+  url: https://github.com/dMac716/sage-smoke-harness.git
   architectures:
     - "linux/arm64"
     - "linux/amd64"
