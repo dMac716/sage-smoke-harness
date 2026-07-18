@@ -136,7 +136,10 @@ def iter_video(path: str, every: int = 1) -> Iterator[DevSample]:
 def iter_frames_dir(root: str) -> Iterator[DevSample]:
     """Yield frames from a directory of still images (sorted by name)."""
     files = sorted(
-        p for p in Path(root).glob("*") if p.suffix.lower() in _IMAGE_SUFFIXES
+        p for p in Path(root).glob("*")
+        if p.suffix.lower() in _IMAGE_SUFFIXES and not p.name.startswith(".")
+        # dotfile guard: macOS tars smuggle AppleDouble ._*.jpg xattr files;
+        # pathlib.glob("*") matches them, and they decode to garbage frames.
     )
     if not files:
         raise SystemExit(f"no images ({sorted(_IMAGE_SUFFIXES)}) found in {root!r}")
