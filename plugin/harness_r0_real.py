@@ -113,6 +113,8 @@ def main():
     ap.add_argument("--max-events", type=int, default=2)
     ap.add_argument("--frame-budget-s", type=float, default=10.0,
                     help="per-frame wall-clock watchdog budget")
+    ap.add_argument("--limit-frames", type=int, default=0,
+                    help="stop after N frames total (R3 one-frame gate: 1)")
     ap.add_argument("--frame-delay-s", type=float, default=0.0,
                     help="sleep between frames (simulate node capture cadence; "
                          "also makes the live feed / KILL humanly observable)")
@@ -166,7 +168,7 @@ def main():
 
         try:
             for ei, evt in enumerate(events):
-                if killed:
+                if killed or (args.limit_frames and total >= args.limit_frames):
                     break
                 camera = event_camera(evt)
                 # fresh detector per event — rolling baseline must not leak
@@ -225,6 +227,10 @@ def main():
                         log.error(f"{evt.name} f{fi:03d} FAILED: {e}")
                         err += 1
                     total += 1
+                    if args.limit_frames and total >= args.limit_frames:
+                        log.info(f"frame limit {args.limit_frames} reached")
+                        killed = killed or False
+                        break
                     if args.frame_delay_s > 0:
                         time.sleep(args.frame_delay_s)
         finally:

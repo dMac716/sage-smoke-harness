@@ -22,6 +22,6 @@ ENV PYTHONUNBUFFERED=1
 # Default: run the bundled synthetic series through the full capture spine +
 # shipped cascade; minutes of work, then exit clean. Override --events-root to
 # a runtime-pulled bundle for real regime frames.
-ENTRYPOINT ["python3", "/app/plugin/harness_r0_real.py", \
-            "--events-root", "/app/data/events", \
-            "--min-frames", "5", "--max-events", "2"]
+# Mode dispatch (HARNESS_MODE=harness|probe|endphase); extra args append to
+# the harness CLI (e.g. job spec args: ["--limit-frames","1"]).
+ENTRYPOINT ["/bin/sh", "/app/plugin/launch.sh"]

@@ -1,5 +1,5 @@
 name: smoke-harness
-version: "0.0.1"
+version: "0.0.2"
 namespace: dmac
 description: >
   Self-instrumenting smoke-detection test harness: tiled change-gate ->
