@@ -1,21 +1,21 @@
 #!/bin/sh
 # Mode dispatch for the single plugin image (keeps one ECR app; the job spec
 # selects behavior via HARNESS_MODE):
-#   harness (default) — capture spine + cascade over $EVENTS_ROOT
-#   probe             — the R2 egress boundary probe (seconds, read-only)
+#   harness (default) — capture spine + cascade over $EVENTS_ROOT (bundled)
+#   probe             — R2 egress boundary probe (seconds, read-only)
+#   cache-check       — B2 hostPath persistence marker
+#   tailnet-probe     — R5a userspace-Tailscale join + reach droplet
+#   regime            — R5c full regime: tunnel up -> pull real frames over the
+#                       tailnet -> run cascade streaming live to the droplet
 #   endphase          — bounded post-run digest window (needs OLLAMA_URL)
 set -eu
 MODE="${HARNESS_MODE:-harness}"
-case "$MODE" in
-  probe)
-    exec python3 /app/plugin/egress_probe.py ;;
-  cache-check)
-    exec python3 /app/plugin/cache_check.py ;;
-  tailnet-probe|tailnet)
+
+# Bring up userspace-Tailscale (no TUN, no host route — cannot become
+# all-traffic) and export HTTP_PROXY = tailscaled's outbound proxy, which
+# resolves MagicDNS so callers need no pod DNS changes. Sets TS_IP.
+ts_up() {
     : "${TS_AUTHKEY:?TS_AUTHKEY required for tailnet mode}"
-    # userspace networking: no TUN, no host route change — cannot become
-    # all-traffic. tailscaled's own outbound HTTP proxy resolves MagicDNS,
-    # so the app needs no pod DNS changes (--accept-dns=false).
     SOCK=/tmp/tailscaled.sock
     /usr/local/bin/tailscaled --tun=userspace-networking \
         --socks5-server=localhost:1055 \
@@ -31,7 +31,27 @@ case "$MODE" in
     export TS_IP="$(/usr/local/bin/tailscale --socket="$SOCK" ip -4 2>/dev/null | head -1)"
     export HTTP_PROXY=http://localhost:1080 HTTPS_PROXY=http://localhost:1080 \
            http_proxy=http://localhost:1080 https_proxy=http://localhost:1080
+}
+
+case "$MODE" in
+  probe)
+    exec python3 /app/plugin/egress_probe.py ;;
+  cache-check)
+    exec python3 /app/plugin/cache_check.py ;;
+  tailnet-probe|tailnet)
+    ts_up
     exec python3 /app/plugin/tailnet_probe.py ;;
+  regime)
+    # R5c — real frames over the tailnet + live-stream to the droplet.
+    ts_up
+    : "${BUNDLE_BASE:?BUNDLE_BASE required (droplet MagicDNS base URL)}"
+    BN="${BUNDLE_NAME:-proof-frames}"
+    python3 /app/plugin/bundle_pull.py --base "$BUNDLE_BASE" --name "$BN" \
+        --cache /tmp/bundles
+    export HARNESS_RECEIVER="${HARNESS_RECEIVER:-$BUNDLE_BASE}"
+    exec python3 /app/plugin/harness_r0_real.py \
+        --events-root "/tmp/bundles/$BN/current/events" \
+        --min-frames "${MIN_FRAMES:-5}" --max-events "${MAX_EVENTS:-3}" "$@" ;;
   endphase)
     exec python3 /app/plugin/harness_endphase.py "$@" ;;
   harness|*)
