@@ -13,6 +13,22 @@ FROM python:3.11-slim-bookworm
 
 RUN pip install --no-cache-dir "pywaggle==0.56.3" numpy Pillow
 
+# Tailscale static binaries for the userspace-networking dual-publish leg
+# (tailnet-probe / R5 modes). Fetched by arch from the official static index
+# so this works for both the arm64 node and amd64 builds. No TUN device or
+# host route change is ever used — see plugin/launch.sh.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && arch="$(uname -m)" && case "$arch" in \
+         x86_64) a=amd64 ;; aarch64|arm64) a=arm64 ;; *) a="$arch" ;; esac \
+    && tgz="$(curl -fsSL 'https://pkgs.tailscale.com/stable/?mode=json' \
+             | python3 -c "import json,sys;print(json.load(sys.stdin)['Tarballs']['$a'])")" \
+    && curl -fsSL "https://pkgs.tailscale.com/stable/$tgz" -o /tmp/ts.tgz \
+    && tar -xzf /tmp/ts.tgz -C /tmp \
+    && mv /tmp/tailscale_*/tailscale /tmp/tailscale_*/tailscaled /usr/local/bin/ \
+    && rm -rf /tmp/ts.tgz /tmp/tailscale_* \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+    && tailscale --version
+
 WORKDIR /app
 COPY app/ /app/app/
 COPY plugin/ /app/plugin/
