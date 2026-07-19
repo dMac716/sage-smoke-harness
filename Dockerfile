@@ -13,6 +13,22 @@ FROM python:3.11-slim-bookworm
 
 RUN pip install --no-cache-dir "pywaggle==0.56.3" numpy Pillow
 
+# RF capture + mesh gateway (lora-capture / mesh-gateway modes; see
+# docs/lora-share.md + docs/meshtastic-forward.md):
+# - rtl-433: Debian bookworm ships rtl-433 22.11-1 on both amd64 and arm64
+#   (verified at packages.debian.org/bookworm/rtl-433) — decodes 433/868/915
+#   ISM traffic from an RTL-SDR dongle. If a future base image drops the apt
+#   package, build from source instead:
+#     apt-get install -y cmake build-essential librtlsdr-dev libusb-1.0-0-dev
+#     git clone https://github.com/merbanan/rtl_433 && cmake -B build rtl_433
+#     cmake --build build && cmake --install build
+# - meshtastic: serial/protobuf API for the Meshtastic gateway; small,
+#   mostly pure-python deps (protobuf, pyserial, pypubsub) — no BLE extras.
+RUN apt-get update && apt-get install -y --no-install-recommends rtl-433 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir meshtastic \
+    && rtl_433 -V
+
 # Tailscale static binaries for the userspace-networking dual-publish leg
 # (tailnet-probe / R5 modes). Fetched by arch from the official static index
 # so this works for both the arm64 node and amd64 builds. No TUN device or
