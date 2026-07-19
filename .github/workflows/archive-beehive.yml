@@ -1,16 +1,17 @@
-name: Archive Beehive runs (zero-infra redundancy)
+name: Archive Beehive + publish report (zero-infra redundancy)
 
 # The "everyone else" path — NO droplet, NO tailnet, NO auth key. Every Sage
 # node run publishes crash-safe to Beehive (public data API); this Action tails
-# it on a schedule and commits the NDJSON archive into THIS repo. Fork the repo,
-# set the PLUGIN filter to your image, enable Actions — that's the whole setup.
+# it, commits the NDJSON archive into THIS repo, AND builds a GitHub Pages
+# report you can browse. Fork, set the PLUGIN filter, enable Actions + Pages
+# (Settings -> Pages -> Source: GitHub Actions). That's the whole setup.
 #
-# This is redundancy, not the live feed: it lags one cron interval. For a
-# real-time feed run receiver/serve.py on a tailnet host instead (see README).
+# Redundancy + a report, not a live feed (lags one cron interval). For
+# real-time, run receiver/serve.py on a tailnet host (see README).
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # every 30 min
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       plugin:
@@ -20,6 +21,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: archive-beehive
@@ -29,24 +32,31 @@ jobs:
   archive:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: Tail Beehive into the archive
         env:
-          # EDIT THIS: your plugin image (or set repo variable HARNESS_PLUGIN).
-          # Default matches the reference harness; change it to your namespace.
           PLUGIN: ${{ github.event.inputs.plugin || vars.HARNESS_PLUGIN || '.*smoke-harness.*' }}
           VSN: ${{ vars.HARNESS_VSN || 'H0.*' }}
         run: |
-          python3 tools/beehive_archiver.py \
-            --out ./harness-archive \
+          python3 tools/beehive_archiver.py --out ./harness-archive \
             --vsn "$VSN" --plugin "$PLUGIN"
-      - name: Commit if changed
+      - name: Commit new archive rows
         run: |
           git config user.name  "beehive-archiver[bot]"
           git config user.email "actions@users.noreply.github.com"
           git add harness-archive
           git diff --cached --quiet || git commit -m "archive: beehive runs $(date -u +%FT%TZ)"
           git push || true
+      - name: Build the Pages report
+        run: python3 tools/build_report.py ./harness-archive ./site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: ./site }
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -100,6 +100,6 @@ section). Three tiers, pick what you have:
 
 | You have… | Use | Gets you |
 |---|---|---|
-| just a GitHub repo | this Action | crash-safe archive, ~30-min lag |
+| just a GitHub repo | this Action | crash-safe archive **+ a GitHub Pages report** you can browse, ~30-min lag |
 | a tailnet host | `receiver/serve.py` + your key | real-time live feed + KILL + bundles |
 | nothing | (Beehive itself) | your data is already safe on Beehive; query it anytime |
