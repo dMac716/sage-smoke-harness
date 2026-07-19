@@ -29,11 +29,26 @@ Bounds (this is a camp plugin — it must always come home):
 
 Dedupe: 433 MHz devices repeat each burst 2-3x back-to-back; identical
 (model, id, payload) packets within --dedupe-window-s are dropped (volatile
-radio fields like rssi/snr/time are excluded from the identity).
+radio fields like rssi/snr/time are excluded from the identity). The window
+rearms on last PUBLISH, not last sighting, so a static periodic beacon still
+comes home once per window instead of being suppressed forever.
 
-pywaggle is OPTIONAL: if it is not importable (or Plugin() fails off-node)
-the run degrades to dry-run — every publish prints as one ndjson line on
-stdout — so the whole path is testable with nothing but Python.
+Publish mode is EXPLICIT (never inferred from importability alone): pywaggle
+publish is used only when we are clearly on-node — WAGGLE_APP_ID or any
+WAGGLE_PLUGIN_* env present (the node runtime always injects these), or
+PYWAGGLE_LOG_DIR set (pywaggle's file-mirror dev mode), or --publish forces
+it. Anywhere else — even with pywaggle importable — the run is dry-run:
+every publish prints as one ndjson line on stdout. Off-node, Plugin()
+constructs happily against an unreachable broker and silently DROPS the whole
+queue at __exit__ with rc=0; importability is not deployment.
+
+Operator stop (SIGTERM/SIGINT) is handled: the decoder's process group is
+killed, run.exit publishes with status=killed + counters INSIDE the
+with-Plugin block, and the process exits 0. The decoder's stderr is tailed
+(last 2 KB) and attached to run.exit when the decoder dies, so missing-dongle
+diagnostics come home; a decoder that dies <5 s after launch twice in a row
+ends the run with status=decoder-fault and rc 0 (no crash-loop spam on a
+permanent fault — lesson 0111).
 
 Usage (node):
   python3 plugin/lora_capture.py --duration-s 3600
@@ -43,6 +58,7 @@ Usage (dev, no SDR — canned packets through the identical path):
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import json
 import os
@@ -56,6 +72,13 @@ import traceback
 
 RUN_ID = os.environ.get("RUN_ID", f"lora-capture-{int(time.time())}")
 
+# Bounded decoder-stderr tail attached to run.exit when the decoder dies.
+STDERR_TAIL_CHARS = 2048
+# Crash-loop guard: a decoder death sooner than this after launch is "fast"...
+FAST_EXIT_S = 5.0
+# ...and this many consecutive fast deaths = permanent fault -> stop, rc 0.
+FAST_EXIT_MAX = 2
+
 DEFAULT_RTL433_CMD = "rtl_433 -F json"
 # Fields that identify/annotate rather than measure — meta, not measurements.
 META_FIELDS = {"time", "model", "id", "channel", "mic", "mod", "type",
@@ -66,8 +89,13 @@ VOLATILE_FIELDS = {"time", "rssi", "snr", "noise", "freq", "freq1", "freq2"}
 
 
 def slug(s: str) -> str:
-    """Lowercase [a-z0-9_] ontology token: 'Acurite-5n1' -> 'acurite_5n1'."""
-    out = "".join(c if c.isalnum() else "_" for c in str(s).strip().lower())
+    """Lowercase [a-z0-9_] ontology token: 'Acurite-5n1' -> 'acurite_5n1'.
+
+    ASCII-only on purpose: pywaggle rejects publish names outside
+    [a-z0-9._]; Unicode isalnum() (e.g. 'température') would crash publish.
+    """
+    out = "".join(c if (c.isascii() and c.isalnum()) else "_"
+                  for c in str(s).strip().lower())
     while "__" in out:
         out = out.replace("__", "_")
     return out.strip("_") or "unknown"
@@ -108,12 +136,18 @@ def packet_meta(pkt: dict) -> dict:
 
 
 class PacketDeduper:
-    """Drop identical (model,id,payload) packets seen within window_s."""
+    """Drop identical (model,id,payload) packets seen within window_s.
+
+    The window rearms on the last PUBLISH, not the last sighting: a static
+    1 Hz beacon (identical payload forever) must still publish once every
+    window_s. Rearming on sighting would push the timestamp forward on every
+    dropped repeat and suppress it for the life of the run.
+    """
 
     def __init__(self, window_s: float = 2.0, max_keys: int = 4096):
         self.window_s = window_s
         self.max_keys = max_keys
-        self._last = {}  # identity -> last-seen monotonic ts
+        self._last = {}  # identity -> monotonic ts of last PUBLISHED copy
 
     @staticmethod
     def identity(pkt: dict) -> str:
@@ -124,26 +158,50 @@ class PacketDeduper:
     def is_dupe(self, pkt: dict, now: float) -> bool:
         key = self.identity(pkt)
         last = self._last.get(key)
-        self._last[key] = now
+        dupe = last is not None and (now - last) < self.window_s
+        if not dupe:  # this copy will publish -> rearm the window from it
+            self._last[key] = now
         if len(self._last) > self.max_keys:  # bound memory on a long run
             cutoff = now - self.window_s
             self._last = {k: t for k, t in self._last.items() if t >= cutoff}
-        return last is not None and (now - last) < self.window_s
+        return dupe
 
 
-def _plugin_context():
+def _on_node() -> bool:
+    """True only when the Waggle node runtime is clearly present.
+
+    Signals: WAGGLE_APP_ID or any WAGGLE_PLUGIN_* env (injected by the node
+    scheduler), or PYWAGGLE_LOG_DIR (pywaggle's explicit file-mirror mode,
+    where publishes land on disk rather than in a broker queue).
+    """
+    if os.environ.get("WAGGLE_APP_ID") or os.environ.get("PYWAGGLE_LOG_DIR"):
+        return True
+    return any(k.startswith("WAGGLE_PLUGIN_") for k in os.environ)
+
+
+def _plugin_context(force_publish: bool = False):
     """(context manager yielding plugin-or-None, mode string).
 
-    pywaggle importable + Plugin() constructs -> live publish; otherwise
-    degrade to dry-run (plugin=None), never crash — offline-first contract.
+    Publish mode is EXPLICIT: pywaggle only when --publish forces it or the
+    node runtime env is present (_on_node). Otherwise dry-run — even when
+    pywaggle imports fine. Off-node, Plugin() constructs against an
+    unreachable broker, queues every publish, then silently drops the whole
+    queue at __exit__ with rc=0 — a telemetry black-hole, never acceptable.
+    On-node, PYWAGGLE_LOG_DIR file mirroring keeps working: it lives inside
+    Plugin itself and this function does not touch it.
     """
+    if not (force_publish or _on_node()):
+        return contextlib.nullcontext(None), "dry-run"
     try:
         from waggle.plugin import Plugin
     except ImportError:
+        if force_publish:
+            print("[lora_capture] --publish requested but pywaggle is not "
+                  "importable; dry-run", file=sys.stderr)
         return contextlib.nullcontext(None), "dry-run"
     try:
         return Plugin(), "pywaggle"
-    except Exception as e:  # off-node / misconfigured runtime
+    except Exception as e:  # misconfigured runtime
         print(f"[lora_capture] Plugin() failed ({e}); dry-run", file=sys.stderr)
         return contextlib.nullcontext(None), "dry-run"
 
@@ -181,12 +239,26 @@ def _terminate(proc):
                 proc.wait(timeout=3)
 
 
+def _drain_stderr(stream, tail):
+    """Reader thread: keep a bounded tail of the decoder's stderr so its
+    dying words (missing dongle, USB error) can ride home on run.exit."""
+    with contextlib.suppress(Exception):
+        for chunk in iter(lambda: stream.read(256), ""):
+            tail.extend(chunk)
+
+
 def capture(args, pub) -> int:
     """The bounded capture loop. Publishes run.header/run.exit itself."""
-    counters = {"packets": 0, "published": 0, "deduped": 0, "malformed": 0}
+    counters = {"packets": 0, "published": 0, "deduped": 0, "malformed": 0,
+                "publish_errors": 0, "decoder_restarts": 0}
     expired = threading.Event()   # watchdog fired
     stop = threading.Event()      # loop finished -> stop helper threads
-    status = "eof"                # subprocess ended on its own
+    killed = {"sig": None}        # operator SIGTERM/SIGINT received
+    procbox = {"proc": None}      # current decoder (swapped across restarts)
+    stderr_tail = collections.deque(maxlen=STDERR_TAIL_CHARS)
+    exit_extra = {}               # extra run.exit meta (error text)
+    status = "eof"                # decoder ended on its own
+    rc_forced = None
     rc = 1
 
     pub("lora.capture.run.header", 1, meta={
@@ -195,26 +267,14 @@ def capture(args, pub) -> int:
         "limit_packets": str(args.limit_packets),
         "dedupe_window_s": str(args.dedupe_window_s)})
 
-    try:
-        proc = subprocess.Popen(
-            shlex.split(args.rtl433_cmd), stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
-            start_new_session=hasattr(os, "setsid"))
-    except FileNotFoundError:
-        msg = (f"rtl_433 launch failed: {shlex.split(args.rtl433_cmd)[0]!r} "
-               f"not found (install rtl_433, or point --rtl433-cmd at it)")
-        print(f"[lora_capture] {msg}", file=sys.stderr)
-        pub("lora.capture.run.exit", 1, meta={
-            "run_id": RUN_ID, "status": "rtl433-missing", "error": msg,
-            **{k: str(v) for k, v in counters.items()}})
-        return 2
-
     def watchdog():
         # Hard time budget: terminating the subprocess also unblocks a
         # reader stuck on a silent radio.
         if not stop.wait(args.duration_s):
             expired.set()
-            _terminate(proc)
+            p = procbox["proc"]
+            if p is not None:
+                _terminate(p)
 
     def heartbeat():
         n = 0
@@ -224,52 +284,137 @@ def capture(args, pub) -> int:
                 **{k: str(v) for k, v in counters.items()}})
             n += 1
 
+    def _on_signal(signum, frame):
+        # Operator stop: mark it, TERM the decoder's group — the closed pipe
+        # unblocks the reader, and run.exit flushes inside the Plugin block.
+        killed["sig"] = signum
+        p = procbox["proc"]
+        if p is not None:
+            with contextlib.suppress(Exception):
+                _signal_group(p, signal.SIGTERM)
+
+    prev_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for s in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(ValueError, OSError):
+                prev_handlers[s] = signal.signal(s, _on_signal)
+
     threads = [threading.Thread(target=watchdog, daemon=True),
                threading.Thread(target=heartbeat, daemon=True)]
     for t in threads:
         t.start()
 
     deduper = PacketDeduper(window_s=args.dedupe_window_s)
+    fast_exits = 0
     try:
-        for raw_line in proc.stdout:
-            line = raw_line.strip()
-            if not line:
-                continue
-            pkt = parse_line(line)
-            if pkt is None:
-                counters["malformed"] += 1
-                continue
-            counters["packets"] += 1
-            if deduper.is_dupe(pkt, time.monotonic()):
-                counters["deduped"] += 1
-                continue
-            meta = packet_meta(pkt)
-            pub("lora.rtl433.raw",
-                json.dumps(pkt, separators=(",", ":"), default=str),
-                meta=meta)
-            for name, value in measurements(pkt):
-                pub(name, value, meta=meta)
-            counters["published"] += 1
-            if (args.limit_packets > 0
-                    and counters["published"] >= args.limit_packets):
-                status = "limit-reached"
+        while True:  # decoder launch/relaunch loop
+            if killed["sig"] is not None or expired.is_set():
                 break
+            started = time.monotonic()
+            try:
+                proc = subprocess.Popen(
+                    shlex.split(args.rtl433_cmd), stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, bufsize=1,
+                    start_new_session=hasattr(os, "setsid"))
+            except FileNotFoundError:
+                msg = (f"rtl_433 launch failed: "
+                       f"{shlex.split(args.rtl433_cmd)[0]!r} not found "
+                       f"(install rtl_433, or point --rtl433-cmd at it)")
+                print(f"[lora_capture] {msg}", file=sys.stderr)
+                status = "rtl433-missing"
+                exit_extra["error"] = msg
+                rc_forced = 2
+                break
+            procbox["proc"] = proc
+            t_err = threading.Thread(target=_drain_stderr,
+                                     args=(proc.stderr, stderr_tail),
+                                     daemon=True)
+            t_err.start()
+            threads.append(t_err)
+
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                pkt = parse_line(line)
+                if pkt is None:
+                    counters["malformed"] += 1
+                    continue
+                counters["packets"] += 1
+                if deduper.is_dupe(pkt, time.monotonic()):
+                    counters["deduped"] += 1
+                    continue
+                meta = packet_meta(pkt)
+                try:
+                    pub("lora.rtl433.raw",
+                        json.dumps(pkt, separators=(",", ":"), default=str),
+                        meta=meta)
+                    for name, value in measurements(pkt):
+                        pub(name, value, meta=meta)
+                except Exception as e:
+                    # One hostile packet (bad name/value for the publisher)
+                    # must never kill the run: count it, log it, move on.
+                    counters["publish_errors"] += 1
+                    print(f"[lora_capture] publish failed for "
+                          f"model={meta.get('model')!r}: {e}",
+                          file=sys.stderr)
+                    continue
+                counters["published"] += 1
+                if (args.limit_packets > 0
+                        and counters["published"] >= args.limit_packets):
+                    status = "limit-reached"
+                    break
+
+            # Decoder stdout closed (its death) or we broke out ourselves.
+            _terminate(proc)
+            if (status == "limit-reached" or killed["sig"] is not None
+                    or expired.is_set()):
+                break
+            if proc.poll() == 0:
+                break  # clean EOF (canned input finished) -> status "eof"
+            # Unexpected nonzero decoder death: crash-loop guard, then
+            # relaunch within the same bounded run.
+            if time.monotonic() - started < FAST_EXIT_S:
+                fast_exits += 1
+                if fast_exits >= FAST_EXIT_MAX:
+                    # Permanent fault (missing dongle, bad driver): report
+                    # via telemetry and stop cleanly — rc 0, no crash-loop
+                    # spam for the scheduler to amplify (lesson 0111).
+                    status = "decoder-fault"
+                    break
+            else:
+                fast_exits = 0
+            counters["decoder_restarts"] += 1
     finally:
         stop.set()
-        _terminate(proc)
+        p = procbox["proc"]
+        if p is not None:
+            _terminate(p)
+        for s, h in prev_handlers.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(s, h)
         for t in threads:
             t.join(timeout=3)
         if expired.is_set():
             status = "watchdog-expired"
-        proc_rc = proc.poll()
-        # A run that captured what it was asked to (or ran its full budget)
-        # is a success; only an unasked-for subprocess death is a failure.
-        rc = 0 if status in ("limit-reached", "watchdog-expired") \
-            or proc_rc == 0 else 1
-        pub("lora.capture.run.exit", 1, meta={
+        if killed["sig"] is not None:
+            status = "killed"
+            exit_extra["signal"] = str(killed["sig"])
+        proc_rc = p.poll() if p is not None else None
+        # A run that captured what it was asked to, ran its full budget, was
+        # stopped by the operator, or cleanly reported a permanent decoder
+        # fault is a success; only an unexplained decoder death is a failure.
+        rc = 0 if status in ("limit-reached", "watchdog-expired", "killed",
+                             "decoder-fault") or proc_rc == 0 else 1
+        exit_meta = {
             "run_id": RUN_ID, "status": status, "proc_rc": str(proc_rc),
-            **{k: str(v) for k, v in counters.items()}})
-    return rc
+            **exit_extra, **{k: str(v) for k, v in counters.items()}}
+        tail = "".join(stderr_tail).strip()
+        if tail and status in ("eof", "decoder-fault") and proc_rc != 0:
+            # The decoder died: its last words are the diagnostics.
+            exit_meta["stderr_tail"] = tail[-STDERR_TAIL_CHARS:]
+        pub("lora.capture.run.exit", 1, meta=exit_meta)
+    return rc_forced if rc_forced is not None else rc
 
 
 def main(argv=None) -> int:
@@ -286,9 +431,14 @@ def main(argv=None) -> int:
                     help="identical-packet suppression window")
     ap.add_argument("--heartbeat-s", type=float, default=10.0,
                     help="liveness heartbeat period")
+    ap.add_argument("--publish", action="store_true",
+                    help="force pywaggle publish mode; without this flag "
+                         "pywaggle is used only when the node runtime env "
+                         "(WAGGLE_APP_ID / WAGGLE_PLUGIN_* / "
+                         "PYWAGGLE_LOG_DIR) is present")
     args = ap.parse_args(argv)
 
-    ctx, mode = _plugin_context()
+    ctx, mode = _plugin_context(force_publish=args.publish)
     with ctx as plugin:
         pub = make_pub(plugin)
         try:
