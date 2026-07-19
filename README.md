@@ -80,3 +80,26 @@ dual-publish redundancy on **your own** tailnet:
 
 Everything is env-parameterised, so your job and the reference job run the
 **same image** with different config — neither can break the other.
+
+## Zero-infra redundancy — just a GitHub repo (for everyone else)
+
+No droplet, no tailnet, no key. Every Sage node run publishes crash-safe to
+**Beehive** (the public data API), so you can archive your runs with only a
+GitHub repo:
+
+1. **Fork this repo.**
+2. Set repo **variable** `HARNESS_PLUGIN` to your plugin image regex (e.g.
+   `.*yourname/yourplugin.*`), optionally `HARNESS_VSN` (default `H0.*`).
+3. **Enable Actions.** `.github/workflows/archive-beehive.yml` runs every
+   30 min, tails Beehive for your measurements, and commits them under
+   `harness-archive/` — watermarked + de-duped (`tools/beehive_archiver.py`).
+
+That's the whole setup. It's *redundancy* (lags one interval), not a live
+feed — for real-time, run `receiver/serve.py` on a tailnet host (previous
+section). Three tiers, pick what you have:
+
+| You have… | Use | Gets you |
+|---|---|---|
+| just a GitHub repo | this Action | crash-safe archive, ~30-min lag |
+| a tailnet host | `receiver/serve.py` + your key | real-time live feed + KILL + bundles |
+| nothing | (Beehive itself) | your data is already safe on Beehive; query it anytime |

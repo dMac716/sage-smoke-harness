@@ -1,0 +1,52 @@
+name: Archive Beehive runs (zero-infra redundancy)
+
+# The "everyone else" path — NO droplet, NO tailnet, NO auth key. Every Sage
+# node run publishes crash-safe to Beehive (public data API); this Action tails
+# it on a schedule and commits the NDJSON archive into THIS repo. Fork the repo,
+# set the PLUGIN filter to your image, enable Actions — that's the whole setup.
+#
+# This is redundancy, not the live feed: it lags one cron interval. For a
+# real-time feed run receiver/serve.py on a tailnet host instead (see README).
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # every 30 min
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: "plugin image regex (Beehive filter.plugin)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive-beehive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Tail Beehive into the archive
+        env:
+          # EDIT THIS: your plugin image (or set repo variable HARNESS_PLUGIN).
+          # Default matches the reference harness; change it to your namespace.
+          PLUGIN: ${{ github.event.inputs.plugin || vars.HARNESS_PLUGIN || '.*smoke-harness.*' }}
+          VSN: ${{ vars.HARNESS_VSN || 'H0.*' }}
+        run: |
+          python3 tools/beehive_archiver.py \
+            --out ./harness-archive \
+            --vsn "$VSN" --plugin "$PLUGIN"
+      - name: Commit if changed
+        run: |
+          git config user.name  "beehive-archiver[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add harness-archive
+          git diff --cached --quiet || git commit -m "archive: beehive runs $(date -u +%FT%TZ)"
+          git push || true
