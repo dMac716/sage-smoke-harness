@@ -15,7 +15,7 @@ from waggle.plugin import Plugin
 
 RUN_ID = os.environ.get("RUN_ID", f"tailnet-probe-{int(time.time())}")
 RECEIVER = os.environ.get("HARNESS_RECEIVER",
-                          "http://sage-observatory.tail55e176.ts.net")
+                          "")  # set HARNESS_RECEIVER — no default (BYO)
 
 
 def main() -> int:

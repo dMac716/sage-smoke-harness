@@ -57,3 +57,26 @@ PYWAGGLE_LOG_DIR=/tmp/harness python3 plugin/harness_r0_real.py \
 Optional live feed + kill: set `HARNESS_RECEIVER=http://<your-receiver-host>`
 (a small Flask blueprint implementing `/harness/ingest`, `/harness/control`,
 `/harness/kill`).
+
+## Bring your own redundancy (for other participants)
+
+The plugin image has **no hardcoded infrastructure** — receiver host, bundle
+host, and auth key are all env. To get the same crash-safe + real-time
+dual-publish redundancy on **your own** tailnet:
+
+1. **Mint your own Tailscale key** (ephemeral + reusable) on your tailnet.
+   A key is tailnet-scoped — it only joins *your* tailnet, so this never
+   touches anyone else's setup.
+2. **Run the receiver** (`receiver/serve.py`) on a host joined to your tailnet
+   (`pip install flask; DATA_ROOT=./harness-data python3 receiver/serve.py`),
+   then expose it tailnet-only (`tailscale serve 8777`).
+3. **Put frame bundles** under `$DATA_ROOT/bundles/<name>/` (a `current.json`
+   manifest + a `.tar.gz`; see `plugin/bundle_pull.py` for the format).
+4. **Submit** with your env — same image, your values:
+   ```
+   HARNESS_MODE=regime  TS_AUTHKEY=<your key>
+   BUNDLE_BASE=http://<your-host-magicdns>   # HARNESS_RECEIVER defaults to this
+   ```
+
+Everything is env-parameterised, so your job and the reference job run the
+**same image** with different config — neither can break the other.
